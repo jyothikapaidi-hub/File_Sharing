@@ -3,12 +3,14 @@ import random
 import string
 import time
 import threading
+import json
 from flask import Flask, request, send_file, render_template
 
 app = Flask(__name__)
 
 # --- Config ---
 UPLOAD_FOLDER = "uploads"
+LINKS_FILE = "file_links.json"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024  # 25 MB
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
@@ -23,8 +25,27 @@ EXPIRY_OPTIONS = {
 }
 DEFAULT_EXPIRY = "15"
 
+# Load file links from persistent storage
+def load_file_links():
+    """Load file links from JSON file"""
+    if os.path.exists(LINKS_FILE):
+        try:
+            with open(LINKS_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_file_links(file_links):
+    """Save file links to JSON file"""
+    try:
+        with open(LINKS_FILE, 'w') as f:
+            json.dump(file_links, f)
+    except:
+        pass
+
 # Store mapping: { random_id: {"path":..., "time":..., "expiry":...} }
-file_links = {}
+file_links = load_file_links()
 
 def generate_random_string(length=8):
     """Generate random ID for each file link"""
@@ -62,6 +83,7 @@ def upload():
             "time": time.time(),
             "expiry": expiry_seconds
         }
+        save_file_links(file_links)  # Persist to disk
 
         share_link = request.host_url + random_id
         # Render the same page but with the link
@@ -77,7 +99,16 @@ def download(random_id):
     if not file_info:
         return "Invalid or expired link", 404
 
-    return send_file(file_info["path"], as_attachment=True)
+    filepath = file_info["path"]
+    # Check if file exists
+    if not os.path.exists(filepath):
+        return "File not found", 404
+
+    try:
+        return send_file(filepath, as_attachment=True)
+    except Exception as e:
+        app.logger.error(f"Error serving file {filepath}: {str(e)}")
+        return "Error downloading file", 500
 
 # --- Background cleaner thread ---
 def cleanup_expired_files():
@@ -98,6 +129,9 @@ def cleanup_expired_files():
         # Remove expired entries
         for key in expired_keys:
             del file_links[key]
+        
+        if expired_keys:
+            save_file_links(file_links)  # Persist changes
 
         time.sleep(60)  # Check every 60 seconds
 
